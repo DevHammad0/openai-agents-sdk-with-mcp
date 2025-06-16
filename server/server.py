@@ -1,12 +1,21 @@
 import asyncio
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypedDict
 from mcp.server.fastmcp import FastMCP, Context
 
 from Data.dummy_data import student_store, enrollment_store, topic_store
 from Models.pydantic_models import Enrollment, Student, CourseCode, CourseSection, ClassSchedule
 
+# Constants
+ERROR_CODES = {
+    "STUDENT_NOT_FOUND": "Student not found",
+    "ENROLLMENT_NOT_FOUND": "No enrollment found for course",
+    "SCHEDULE_NOT_FOUND": "No schedule found for course",
+    "NO_NEXT_CLASS": "No upcoming classes scheduled",
+    "TOPIC_NOT_FOUND": "No current topic found for course",
+    "INTERNAL_ERROR": "Internal server error"
+}
 
 # Configure logging with proper format
 logging.basicConfig(
@@ -15,6 +24,34 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Response type definitions
+class ErrorResponse(TypedDict):
+    code: str
+    message: str
+
+class ApiResponse(TypedDict):
+    success: bool
+    data: Optional[Dict[str, Any]]
+    error: Optional[ErrorResponse]
+
+def create_error_response(code: str, message: str) -> ApiResponse:
+    """Create a standardized error response."""
+    return {
+        "success": False,
+        "error": {
+            "code": code,
+            "message": message
+        },
+        "data": None
+    }
+
+def create_success_response(data: Dict[str, Any]) -> ApiResponse:
+    """Create a standardized success response."""
+    return {
+        "success": True,
+        "data": data,
+        "error": None
+    }
 
 # Initialize MCP server with proper configuration
 mcp = FastMCP(
@@ -55,7 +92,7 @@ def find_enrollment(course_code: CourseCode) -> Optional[Enrollment]:
     description="Get detailed student profile including enrollment information",
     mime_type="application/json"
 )
-def get_student_info(student_id: str) -> Dict[str, Any]:
+def get_student_info(student_id: str) -> ApiResponse:
     """
     Get student profile and enrollment details.
     
@@ -65,33 +102,25 @@ def get_student_info(student_id: str) -> Dict[str, Any]:
     Returns:
         Dict containing student and enrollment information or error details
     """
-    student = find_student(student_id)
-    if not student:
-        return {
-            "success": False,
-            "error": {
-                "code": "STUDENT_NOT_FOUND",
-                "message": "Student not found",
-            }
-        }
-    
-    enrollment = find_enrollment(student.course_code)
-    if not enrollment:
-        return {
-            "success": False,
-            "error": {
-                "code": "ENROLLMENT_NOT_FOUND",
-                "message": f"No enrollment found for course {student.course_code}"
-            }
-        }
-    
-    return {
-        "success": True,
-        "data": {
+    try:
+        student = find_student(student_id)
+        if not student:
+            return create_error_response("STUDENT_NOT_FOUND", ERROR_CODES["STUDENT_NOT_FOUND"])
+        
+        enrollment = find_enrollment(student.course_code)
+        if not enrollment:
+            return create_error_response(
+                "ENROLLMENT_NOT_FOUND", 
+                f"{ERROR_CODES['ENROLLMENT_NOT_FOUND']} {student.course_code}"
+            )
+        
+        return create_success_response({
             "student": student.model_dump(),
             "enrollment": enrollment.model_dump()
-        }
-    }
+        })
+    except Exception as e:
+        logger.error(f"Error in get_student_info: {str(e)}")
+        return create_error_response("INTERNAL_ERROR", ERROR_CODES["INTERNAL_ERROR"])
 
 
 # --- Tools ---
@@ -101,7 +130,7 @@ def get_student_info(student_id: str) -> Dict[str, Any]:
     name="get_class_schedule",
     description="Retrieve the class schedule for a specific course and section"
 )
-def get_class_schedule(course_code: CourseCode, section: CourseSection) -> Dict[str, Any]:
+def get_class_schedule(course_code: CourseCode, section: CourseSection) -> ApiResponse:
     """
     Retrieve the class schedule for a given course and section.
     
@@ -122,32 +151,20 @@ def get_class_schedule(course_code: CourseCode, section: CourseSection) -> Dict[
         )
         
         if not schedule_info:
-            return {
-                "success": False,
-                "error": {
-                    "code": "SCHEDULE_NOT_FOUND",
-                    "message": f"No schedule found for {course_code} section {section}"
-                }
-            }
+            return create_error_response(
+                "SCHEDULE_NOT_FOUND",
+                f"{ERROR_CODES['SCHEDULE_NOT_FOUND']} {course_code} section {section}"
+            )
         
-        return {
-            "success": True,
-            "data": {
-                "course_code": course_code,
-                "section": section,
-                "schedule": [session.model_dump() for session in schedule_info.schedule]
-            }
-        }
+        return create_success_response({
+            "course_code": course_code,
+            "section": section,
+            "schedule": [session.model_dump() for session in schedule_info.schedule]
+        })
             
     except Exception as e:
-        logger.error(f"Error fetching schedule: {str(e)}")
-        return {
-            "success": False,
-            "error": {
-                "code": "INTERNAL_ERROR",
-                "message": "Failed to fetch schedule"
-            }
-        }
+        logger.error(f"Error in get_class_schedule: {str(e)}")
+        return create_error_response("INTERNAL_ERROR", ERROR_CODES["INTERNAL_ERROR"])
 
 
 ## --- Next Class Time ---
@@ -155,7 +172,7 @@ def get_class_schedule(course_code: CourseCode, section: CourseSection) -> Dict[
     name="get_next_class",
     description="Retrieve the next scheduled class time for a specific course and section",
 )
-def get_next_class_time(course_code: CourseCode, section: CourseSection) -> Dict[str, Any]:
+def get_next_class_time(course_code: CourseCode, section: CourseSection) -> ApiResponse:
     """Retrieve the next class time for a given course and section."""
     try:
         # Find matching enrollment
@@ -166,42 +183,24 @@ def get_next_class_time(course_code: CourseCode, section: CourseSection) -> Dict
         )
         
         if not enrollment:
-            return {
-                "success": False,
-                "error": {
-                    "code": "SCHEDULE_NOT_FOUND",
-                    "message": f"No schedule found for {course_code} section {section}"
-                }
-            }
+            return create_error_response(
+                "SCHEDULE_NOT_FOUND",
+                f"{ERROR_CODES['SCHEDULE_NOT_FOUND']} {course_code} section {section}"
+            )
             
         if not enrollment.next_class_time:
-            return {
-                "success": False,
-                "error": {
-                    "code": "NO_NEXT_CLASS",
-                    "message": "No upcoming classes scheduled"
-                }
-            }
+            return create_error_response("NO_NEXT_CLASS", ERROR_CODES["NO_NEXT_CLASS"])
             
-        return {
-            "success": True,
-            "data": {
-                "course_code": course_code,
-                "section": section,
-                "next_class_time": enrollment.next_class_time.isoformat(),
-                "instructor": enrollment.instructor
-            }
-        }
+        return create_success_response({
+            "course_code": course_code,
+            "section": section,
+            "next_class_time": enrollment.next_class_time.isoformat(),
+            "instructor": enrollment.instructor
+        })
             
     except Exception as e:
-        logger.error(f"Error fetching next class time: {str(e)}")
-        return {
-            "success": False,
-            "error": {
-                "code": "INTERNAL_ERROR",
-                "message": "Failed to fetch next class time"
-            }
-        }
+        logger.error(f"Error in get_next_class_time: {str(e)}")
+        return create_error_response("INTERNAL_ERROR", ERROR_CODES["INTERNAL_ERROR"])
 
 
 ## --- Course Current Topic ---
@@ -209,7 +208,7 @@ def get_next_class_time(course_code: CourseCode, section: CourseSection) -> Dict
     name="get_course_topic",
     description="Retrieve the current topic being covered in a specific course",
 )
-def get_course_current_topic(course_code: CourseCode) -> Dict[str, Any]:
+def get_course_current_topic(course_code: CourseCode) -> ApiResponse:
     """Retrieve the current topic for a given course."""
     try:
         # Find matching topic
@@ -219,28 +218,16 @@ def get_course_current_topic(course_code: CourseCode) -> Dict[str, Any]:
         )
         
         if not topic:
-            return {
-                "success": False,
-                "error": {
-                    "code": "TOPIC_NOT_FOUND",
-                    "message": f"No current topic found for course {course_code}"
-                }
-            }
+            return create_error_response(
+                "TOPIC_NOT_FOUND",
+                f"{ERROR_CODES['TOPIC_NOT_FOUND']} {course_code}"
+            )
             
-        return {
-            "success": True,
-            "data": topic.model_dump()
-        }
+        return create_success_response(topic.model_dump())
             
     except Exception as e:
-        logger.error(f"Error fetching current topic: {str(e)}")
-        return {
-            "success": False,
-            "error": {
-                "code": "INTERNAL_ERROR",
-                "message": "Failed to fetch current topic"
-            }
-        }
+        logger.error(f"Error in get_course_current_topic: {str(e)}")
+        return create_error_response("INTERNAL_ERROR", ERROR_CODES["INTERNAL_ERROR"])
 
 
 ## --- Student's Course Covered Topics ---
@@ -248,19 +235,13 @@ def get_course_current_topic(course_code: CourseCode) -> Dict[str, Any]:
     name="get_covered_topics",
     description="Retrieve the list of topics covered so far in the student's enrolled course",
 )
-def get_course_covered_topics(student_id: str) -> Dict[str, Any]:
+def get_course_covered_topics(student_id: str) -> ApiResponse:
     """Retrieve the covered topics for a student's enrolled course."""
     try:
         # Find student
         student = find_student(student_id)
         if not student:
-            return {
-                "success": False,
-                "error": {
-                    "code": "STUDENT_NOT_FOUND",
-                    "message": "Student not found"
-                }
-            }
+            return create_error_response("STUDENT_NOT_FOUND", ERROR_CODES["STUDENT_NOT_FOUND"])
             
         # Find enrollment using student's course code
         enrollment = next(
@@ -270,34 +251,22 @@ def get_course_covered_topics(student_id: str) -> Dict[str, Any]:
         )
         
         if not enrollment:
-            return {
-                "success": False,
-                "error": {
-                    "code": "ENROLLMENT_NOT_FOUND",
-                    "message": f"No enrollment found for course {student.course_code}"
-                }
-            }
+            return create_error_response(
+                "ENROLLMENT_NOT_FOUND",
+                f"{ERROR_CODES['ENROLLMENT_NOT_FOUND']} {student.course_code}"
+            )
             
-        return {
-            "success": True,
-            "data": {
-                "student_id": student_id,
-                "course_code": student.course_code,
-                "course_name": enrollment.course_name,
-                "instructor": enrollment.instructor,
-                "covered_topics": enrollment.covered_topics
-            }
-        }
+        return create_success_response({
+            "student_id": student_id,
+            "course_code": student.course_code,
+            "course_name": enrollment.course_name,
+            "instructor": enrollment.instructor,
+            "covered_topics": enrollment.covered_topics
+        })
             
     except Exception as e:
-        logger.error(f"Error fetching covered topics: {str(e)}")
-        return {
-            "success": False,
-            "error": {
-                "code": "INTERNAL_ERROR",
-                "message": "Failed to fetch covered topics"
-            }
-        }
+        logger.error(f"Error in get_course_covered_topics: {str(e)}")
+        return create_error_response("INTERNAL_ERROR", ERROR_CODES["INTERNAL_ERROR"])
 
 
 # # --- Main entry point to run the server ---
